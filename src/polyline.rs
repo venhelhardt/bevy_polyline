@@ -1,22 +1,25 @@
 use crate::material::PolylineMaterialHandle;
 use bevy::{
     ecs::{
-        query::ROQueryItem,
+        query::{QueryItem, ROQueryItem},
         system::{
             lifetimeless::{Read, SRes},
             SystemParamItem,
         },
     },
     prelude::*,
+    reflect::TypePath,
     render::{
-        extract_component::{ComponentUniforms, DynamicUniformIndex, UniformComponentPlugin},
+        extract_component::{
+            ComponentUniforms, DynamicUniformIndex, ExtractComponent, ExtractComponentPlugin,
+            UniformComponentPlugin,
+        },
         render_asset::{PrepareAssetError, RenderAsset, RenderAssetPlugin, RenderAssets},
         render_phase::{PhaseItem, RenderCommand, RenderCommandResult, TrackedRenderPass},
         render_resource::{binding_types::uniform_buffer, *},
         renderer::RenderDevice,
-        sync_world::{RenderEntity, SyncToRenderWorld},
-        view::{ViewUniform, ViewUniforms},
-        Extract, Render, RenderApp, RenderSet,
+        view::{ViewUniform, ViewUniforms, VisibilityClass},
+        Render, RenderApp, RenderSet,
     },
 };
 
@@ -32,13 +35,13 @@ impl Plugin for PolylineBasePlugin {
 pub struct PolylineRenderPlugin;
 impl Plugin for PolylineRenderPlugin {
     fn build(&self, app: &mut App) {
-        app.add_plugins(UniformComponentPlugin::<PolylineUniform>::default());
+        app.add_plugins(ExtractComponentPlugin::<PolylineExtractor>::default())
+            .add_plugins(UniformComponentPlugin::<PolylineUniform>::default());
     }
 
     fn finish(&self, app: &mut App) {
         app.sub_app_mut(RenderApp)
             .init_resource::<PolylinePipeline>()
-            .add_systems(ExtractSchedule, extract_polylines)
             .add_systems(
                 Render,
                 (
@@ -67,8 +70,11 @@ pub struct Polyline {
     pub vertices: Vec<Vec3>,
 }
 
+pub struct PolylineVisibilityClass;
+
 #[derive(Debug, Clone, Default, Component)]
-#[require(SyncToRenderWorld)]
+#[require(VisibilityClass)]
+#[component(on_add = bevy::render::view::add_visibility_class::<PolylineHandle>)]
 pub struct PolylineHandle(pub Handle<Polyline>);
 
 impl RenderAsset for GpuPolyline {
@@ -78,6 +84,7 @@ impl RenderAsset for GpuPolyline {
 
     fn prepare_asset(
         polyline: Self::SourceAsset,
+        _asset_id: AssetId<Self::SourceAsset>,
         render_device: &mut bevy::ecs::system::SystemParamItem<Self::Param>,
     ) -> Result<Self, PrepareAssetError<Self::SourceAsset>> {
         let vertex_buffer_data = bytemuck::cast_slice(polyline.vertices.as_slice());
@@ -106,35 +113,32 @@ pub struct GpuPolyline {
     pub vertex_count: u32,
 }
 
-pub fn extract_polylines(
-    mut commands: Commands,
-    mut previous_len: Local<usize>,
-    query: Extract<
-        Query<(
-            RenderEntity,
-            &InheritedVisibility,
-            &ViewVisibility,
-            &GlobalTransform,
-            &PolylineHandle,
-        )>,
-    >,
-) {
-    let mut values = Vec::with_capacity(*previous_len);
-    for (entity, inherited_visibility, view_visibility, transform, handle) in query.iter() {
+#[derive(Component)]
+struct PolylineExtractor;
+
+impl ExtractComponent for PolylineExtractor {
+    type QueryData = (
+        &'static InheritedVisibility,
+        &'static ViewVisibility,
+        &'static GlobalTransform,
+        &'static PolylineHandle,
+    );
+    type QueryFilter = ();
+    type Out = (PolylineHandle, PolylineUniform);
+
+    fn extract_component(item: QueryItem<'_, Self::QueryData>) -> Option<Self::Out> {
+        let (inherited_visibility, view_visibility, transform, handle) = item;
+
         if !inherited_visibility.get() || !view_visibility.get() {
-            continue;
+            return None;
         }
         let transform = transform.compute_matrix();
-        values.push((
-            entity,
-            (
-                PolylineHandle(handle.0.clone_weak()),
-                PolylineUniform { transform },
-            ),
-        ));
+
+        Some((
+            PolylineHandle(handle.0.clone_weak()),
+            PolylineUniform { transform },
+        ))
     }
-    *previous_len = values.len();
-    commands.insert_or_spawn_batch(values);
 }
 
 #[derive(Clone, Resource)]
